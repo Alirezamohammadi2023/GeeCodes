@@ -1,0 +1,405 @@
+// -------------------------
+// Load city boundary - UPDATED FOR BERLIN
+// -------------------------
+var city = ee.FeatureCollection("projects/ee-alirezamohammadi20142014/assets/Berlin_Megacity");
+Map.centerObject(city, 10);
+
+// -------------------------
+// Load and preprocess Sentinel-2 imagery
+// -------------------------
+var startDate = ee.Date('2024-08-10');
+var endDate = ee.Date('2025-08-10');
+var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(city)
+  .filterDate(startDate, endDate)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20));
+
+// Check if collection is empty
+if (s2.size().getInfo() === 0) {
+  throw new Error('No Sentinel-2 images found for the specified criteria!');
+} else {
+  print('Number of Sentinel-2 images found:', s2.size());
+}
+
+function maskClouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var qaMask = qa.bitwiseAnd(cloudBitMask).eq(0)
+                .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  
+  var scl = image.select('SCL');
+  var sclMask = scl.neq(3).and(scl.neq(8)).and(scl.neq(9));
+  
+  return image.updateMask(qaMask.and(sclMask));
+}
+
+var s2Filtered = s2.map(maskClouds);
+var composite = s2Filtered.median();
+
+// -------------------------
+// NDVI and MNDWI Calculations
+// -------------------------
+var ndvi = composite.normalizedDifference(['B8', 'B4']).rename('NDVI').clip(city);
+var mndwi = composite.normalizedDifference(['B3', 'B11']).rename('MNDWI').clip(city);
+
+// -------------------------
+// Statistics Calculations
+// -------------------------
+// NDVI Statistics
+var ndviStats = ndvi.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: city.geometry(),
+  scale: 10,
+  maxPixels: 1e13,
+  bestEffort: true
+});
+print('Mean NDVI for Berlin (2024-08 to 2025-08):', ndviStats.get('NDVI'));
+
+// MNDWI Statistics
+var mndwiStats = mndwi.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: city.geometry(),
+  scale: 20,
+  maxPixels: 1e13,
+  bestEffort: true
+});
+print('Mean MNDWI for Berlin (2024-08 to 2025-08):', mndwiStats.get('MNDWI'));
+
+// -------------------------
+// Green Space Percentage (NDVI > 0.3)
+// -------------------------
+var vegetationMask = ndvi.gt(0.3);
+var vegStats = vegetationMask.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: city.geometry(),
+  scale: 10,
+  maxPixels: 1e13,
+  bestEffort: true
+});
+var totalPixels = ndvi.reduceRegion({
+  reducer: ee.Reducer.count(),
+  geometry: city.geometry(),
+  scale: 10,
+  maxPixels: 1e13,
+  bestEffort: true
+});
+var greenSpacePercent = ee.Number(vegStats.get('NDVI'))
+                         .divide(ee.Number(totalPixels.get('NDVI')))
+                         .multiply(100);
+print('Green space percentage (NDVI > 0.3):', greenSpacePercent);
+
+// -------------------------
+// Blue Space Percentage (MNDWI > 0.2)
+// -------------------------
+var waterThreshold = 0.2;
+var waterMask = mndwi.gt(waterThreshold);
+var waterStats = waterMask.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: city.geometry(),
+  scale: 20,
+  maxPixels: 1e13,
+  bestEffort: true
+});
+var totalWaterPixels = mndwi.reduceRegion({
+  reducer: ee.Reducer.count(),
+  geometry: city.geometry(),
+  scale: 20,
+  maxPixels: 1e13,
+  bestEffort: true
+});
+var blueSpacePercent = ee.Number(waterStats.get('MNDWI'))
+                         .divide(ee.Number(totalWaterPixels.get('MNDWI')))
+                         .multiply(100);
+print('Blue space percentage (MNDWI > ' + waterThreshold + '):', blueSpacePercent);
+
+// -------------------------
+// Extract and Export Water Bodies & Green Spaces
+// -------------------------
+var ndviThreshold = 0.3; // NDVI > 0.3 = green space
+var mndwiThreshold = 0.2; // MNDWI > 0.2 = water bodies
+
+// 1. Create Binary Masks
+var greenSpaceMask = ndvi.gt(ndviThreshold).rename('green_space');
+var waterBodyMask = mndwi.gt(mndwiThreshold).rename('water_body');
+
+// 2. Calculate Area Statistics (km²)
+var pixelArea = ee.Image.pixelArea().divide(1e6);
+
+var greenArea = greenSpaceMask.multiply(pixelArea).reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: city.geometry(),
+  scale: 10,
+  maxPixels: 1e13,
+  bestEffort: true
+}).get('green_space');
+
+var waterArea = waterBodyMask.multiply(pixelArea).reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: city.geometry(),
+  scale: 20,
+  maxPixels: 1e13,
+  bestEffort: true
+}).get('water_body');
+
+var totalArea = pixelArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: city.geometry(),
+  scale: 10,
+  maxPixels: 1e13,
+  bestEffort: true
+}).get('area');
+
+var greenPercent = ee.Number(greenArea).divide(ee.Number(totalArea)).multiply(100);
+var waterPercent = ee.Number(waterArea).divide(ee.Number(totalArea)).multiply(100);
+
+print('Green Space Area (km²):', greenArea);
+print('Water Body Area (km²):', waterArea);
+print('Total Study Area (km²):', totalArea);
+print('Percentage of Green Space:', greenPercent);
+print('Percentage of Water Bodies:', waterPercent);
+
+// 3. Visualize Results
+Map.addLayer(greenSpaceMask.selfMask(), 
+  {palette: ['#00FF00'], opacity: 0.5}, 
+  'Green Space (NDVI > ' + ndviThreshold + ')');
+
+Map.addLayer(waterBodyMask.selfMask(), 
+  {palette: ['#0000FF'], opacity: 0.5}, 
+  'Water Bodies (MNDWI > ' + mndwiThreshold + ')');
+
+// -------------------------
+// Histogram Calculation
+// -------------------------
+  function getHistogramData(image, bandName, scale, geometry) {
+  var histogram = image.reduceRegion({
+    reducer: ee.Reducer.histogram(100),
+    geometry: geometry,
+    scale: scale,
+    maxPixels: 1e13,
+    bestEffort: false
+  }).get(bandName);
+
+
+  var histDict = ee.Dictionary(histogram);
+  var edges = ee.Array(histDict.get('bucketMeans')).toList();
+  var counts = ee.Array(histDict.get('histogram')).toList();
+  
+  var features = ee.List.sequence(0, edges.size().subtract(1)).map(function(i) {
+    return ee.Feature(null, {
+      'value': edges.getNumber(i),
+      'count': counts.getNumber(i),
+      'index': bandName
+    });
+  });
+  
+  return ee.FeatureCollection(features);
+}
+
+var ndviHistogram = getHistogramData(ndvi, 'NDVI', 10, city.geometry());
+var mndwiHistogram = getHistogramData(mndwi, 'MNDWI', 20, city.geometry());
+var combinedHistogram = ndviHistogram.merge(mndwiHistogram);
+
+// -------------------------
+// Visualization
+// -------------------------
+var ndviPalette = ['d73027', 'f46d43', 'fdae61', 'fee08b', 'd9ef8b', 'a6d96a', '66bd63', '1a9850'];
+var waterPalette = ['ffffff', '9ecae1', '4292c6', '08519c'];
+
+Map.addLayer(ndvi, {
+  min: 0, 
+  max: 1, 
+  palette: ndviPalette,
+  opacity: 0.7
+}, 'NDVI (10m)');
+
+Map.addLayer(mndwi, {
+  min: -1, 
+  max: 1, 
+  palette: waterPalette,
+  opacity: 0.7
+}, 'MNDWI (20m)');
+
+// Add legends
+function addLegend(title, palette, min, max, position) {
+  var legend = ui.Panel({
+    style: {
+      position: position,
+      padding: '8px 15px',
+      backgroundColor: 'white'
+    }
+  });
+  
+  legend.add(ui.Label(title, {fontWeight: 'bold'}));
+  
+  for (var i = 0; i < palette.length; i++) {
+    var value = min + (max - min) * (i / (palette.length - 1));
+    var color = '#' + palette[i];
+    
+    var label = ui.Label({
+      value: value.toFixed(2),
+      style: {margin: '0 0 4px 0'}
+    });
+    
+    var colorBox = ui.Label({
+      style: {
+        backgroundColor: color,
+        padding: '8px',
+        margin: '0 0 4px 8px'
+      }
+    });
+    
+    legend.add(ui.Panel([label, colorBox], ui.Panel.Layout.flow('horizontal')));
+  }
+  
+  Map.add(legend);
+}
+
+addLegend('NDVI Scale', ndviPalette, 0, 1, 'bottom-right');
+addLegend('MNDWI Scale', waterPalette, -1, 1, 'bottom-left');
+
+// -------------------------
+// Histogram Charts
+// -------------------------
+function createHistogramChart(fc, property, title, color) {
+  return ui.Chart.feature.byProperty(fc, property, 'count')
+    .setChartType('ColumnChart')
+    .setOptions({
+      title: title,
+      hAxis: {title: property + ' Value'},
+      vAxis: {title: 'Pixel Count'},
+      colors: [color],
+      bar: {groupWidth: '95%'},
+      legend: {position: 'none'}
+    });
+}
+
+print(createHistogramChart(ndviHistogram, 'value', 'NDVI Distribution', '#1a9850'));
+print(createHistogramChart(mndwiHistogram, 'value', 'MNDWI Distribution', '#08519c'));
+
+// -------------------------
+// Export Results - UPDATED FOR BERLIN
+// -------------------------
+var exportDate = ee.Date(Date.now()).format('YYYY-MM-dd').getInfo();
+var exportSuffix = '_v1.0_' + exportDate;
+
+// Define CRS for Berlin - UTM Zone 33N (EPSG:32633)
+var utmCRS = 'EPSG:32633';   // UTM Zone 33N for Berlin
+
+// Export binary masks with CRS
+Export.image.toDrive({
+  image: greenSpaceMask,
+  description: 'GreenSpace_Mask_Export',
+  fileNamePrefix: 'GBI_GreenSpace_Mask_10m_Berlin',
+  scale: 10,
+  region: city.geometry(),
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  folder: 'GBI_Project',
+  crs: utmCRS
+});
+
+Export.image.toDrive({
+  image: waterBodyMask,
+  description: 'WaterBody_Mask_Export',
+  fileNamePrefix: 'GBI_WaterBody_Mask_20m_Berlin',
+  scale: 20,
+  region: city.geometry(),
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  folder: 'GBI_Project',
+  crs: utmCRS
+});
+
+// Export vector boundaries with CRS attributes
+var greenSpaceVectors = greenSpaceMask.reduceToVectors({
+  geometry: city.geometry(),
+  scale: 10,
+  geometryType: 'polygon',
+  eightConnected: false,
+  labelProperty: 'green_space',
+  maxPixels: 1e13,
+  crs: utmCRS
+});
+
+var waterBodyVectors = waterBodyMask.reduceToVectors({
+  geometry: city.geometry(),
+  scale: 20,
+  geometryType: 'polygon',
+  eightConnected: false,
+  labelProperty: 'water_body',
+  maxPixels: 1e13,
+  crs: utmCRS
+});
+
+Export.table.toDrive({
+  collection: greenSpaceVectors,
+  description: 'GreenSpace_Vectors',
+  fileNamePrefix: 'GBI_GreenSpace_Vectors_10m_Berlin',
+  fileFormat: 'SHP',
+  folder: 'GBI_Project'
+});
+
+Export.table.toDrive({
+  collection: waterBodyVectors,
+  description: 'WaterBody_Vectors',
+  fileNamePrefix: 'GBI_WaterBody_Vectors_20m_Berlin',
+  fileFormat: 'SHP',
+  folder: 'GBI_Project'
+});
+
+// Export statistics with standardized naming
+Export.table.toDrive({
+  collection: ee.FeatureCollection([ee.Feature(null, {
+    'City': 'Berlin',
+    'Mean_NDVI': ndviStats.get('NDVI'),
+    'Mean_MNDWI': mndwiStats.get('MNDWI'),
+    'Green_Space_Area_km2': greenArea,
+    'Water_Body_Area_km2': waterArea,
+    'Total_Area_km2': totalArea,
+    'Green_Space_Percent': greenPercent,
+    'Water_Body_Percent': waterPercent,
+    'NDVI_Threshold': ndviThreshold,
+    'MNDWI_Threshold': mndwiThreshold,
+    'Time_Period': '2024-08_to_2025-08',
+    'Processing_Date': exportDate,
+    'CRS': utmCRS
+  })]),
+  description: 'Area_Statistics',
+  fileNamePrefix: 'GBI_SummaryStats_Berlin',
+  fileFormat: 'CSV',
+  folder: 'GBI_Project'
+});
+
+// Original exports with CRS and naming upgrades
+Export.table.toDrive({
+  collection: combinedHistogram,
+  description: 'Histogram_Data',
+  fileNamePrefix: 'GBI_NDVI_MNDWI_Histograms_Berlin',
+  fileFormat: 'CSV',
+  folder: 'GBI_Project'
+});
+
+Export.image.toDrive({
+  image: ndvi,
+  description: 'NDVI_Export',
+  fileNamePrefix: 'GBI_NDVI_10m_Berlin',
+  scale: 10,
+  region: city.geometry(),
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  folder: 'GBI_Project',
+  crs: utmCRS
+});
+
+Export.image.toDrive({
+  image: mndwi,
+  description: 'MNDWI_Export',
+  fileNamePrefix: 'GBI_MNDWI_20m_Berlin',
+  scale: 20,
+  region: city.geometry(),
+  maxPixels: 1e13,
+  fileFormat: 'GeoTIFF',
+  folder: 'GBI_Project',
+  crs: utmCRS
+});
