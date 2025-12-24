@@ -1,0 +1,98 @@
+// Define the list of all 20 city assets
+var cityAssets = [
+  'projects/ee-alirezamohammadi20142014/assets/Delhi_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Dhaka_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Karachi_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Lagos_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Kinshasa_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Cairo_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Jakarta_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Manila_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/SaoPaulo_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/MexicoCity_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Tokyo_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/NewYork_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Seoul_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/London_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Paris_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Moscow_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Madrid_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Sydney_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/Toronto_Megacity',
+  'projects/ee-alirezamohammadi20142014/assets/LosAngeles_Megacity'
+];
+
+// Load GHSL Population Data (2015) - WORKING DATASET
+var population = ee.Image("JRC/GHSL/P2016/POP_GPW_GLOBE_V1/2015")
+                  .select('population_count')
+                  .rename('population');
+
+// Function to calculate population statistics for each city
+function calculatePopulationStats(cityAsset) {
+  var city = ee.FeatureCollection(cityAsset);
+  
+  // Extract city name from asset path
+  var assetName = ee.String(cityAsset).split('/').get(-1);
+  var cityName = ee.String(assetName).replace('_Megacity', '');
+  
+  // Calculate total population within city boundaries
+  var popStats = population.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: city.geometry(),
+    scale: 250,  // 250m resolution for GHSL dataset
+    maxPixels: 1e13,
+    bestEffort: true
+  });
+  
+  var totalPopulation = ee.Number(popStats.get('population'));
+  
+  // Calculate area in square kilometers
+  var area = city.geometry().area().divide(1000000);
+  
+  // Calculate population density (people per km²)
+  var populationDensity = totalPopulation.divide(area);
+  
+  // Create a feature with all results
+  return ee.Feature(null, {
+    'City_Name': cityName,
+    'Total_Population': totalPopulation,
+    'Area_km2': area,
+    'Population_Density_km2': populationDensity,
+    'Data_Source': 'GHSL (2015)',
+    'Resolution': '250m'
+  });
+}
+
+// Calculate statistics for ALL 20 cities
+var cityStats = ee.FeatureCollection(cityAssets.map(calculatePopulationStats));
+
+// Print complete results to console
+print('Population Statistics for 20 Global Megacities:', cityStats);
+
+// Export to CSV in GBI_Project folder
+Export.table.toDrive({
+  collection: cityStats,
+  description: 'Megacity_Population_Stats_Final',
+  fileNamePrefix: 'Population_Statistics_20_Global_Megacities',
+  folder: 'GBI_Project',
+  fileFormat: 'CSV'
+});
+
+// Visualize population distribution for one city as example
+var exampleCity = ee.FeatureCollection(cityAssets[0]); // Delhi
+Map.centerObject(exampleCity, 8);
+var populationVis = population.clip(exampleCity);
+Map.addLayer(populationVis, {
+  min: 0,
+  max: 50000,
+  palette: ['blue', 'green', 'yellow', 'red']
+}, 'Population Density - Delhi');
+Map.addLayer(exampleCity, {color: 'white', fillColor: '00000000', width: 2}, 'City Boundary');
+
+// Print success message
+print('✅ Processing complete! Check Tasks tab to export CSV file.');
+print('The CSV will contain population data for all 20 megacities:');
+print('1. Delhi', '2. Dhaka', '3. Karachi', '4. Lagos', '5. Kinshasa');
+print('6. Cairo', '7. Jakarta', '8. Manila', '9. SaoPaulo', '10. MexicoCity');
+print('11. Tokyo', '12. NewYork', '13. Seoul', '14. London', '15. Paris');
+print('16. Moscow', '17. Madrid', '18. Berlin', '19. Istanbul', '20. LosAngeles');
